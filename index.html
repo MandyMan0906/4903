@@ -84,6 +84,7 @@ safe-buffer/index.js:
     .status-unk { background:var(--color-surface-offset); color:var(--color-text-muted); }
     .grid2 { display:grid; grid-template-columns:1.3fr .9fr; gap:1rem; margin-bottom:1rem; }
     .card { background:var(--color-surface-2); border-radius:1rem; padding:1rem; min-height:320px; }
+    canvas { width:100% !important; height:250px !important; }
     .section-title { display:flex; justify-content:space-between; gap:.75rem; align-items:center; margin-bottom:.75rem; }
     .section-title h3 { margin:0; font-size:var(--text-lg); } .section-title p { margin:0; font-size:var(--text-sm); color:var(--color-text-muted); }
     pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -191,13 +192,8 @@ safe-buffer/index.js:
               <pre id="latestPayload">尚未收到訊息。</pre>
             </div>
             <div class="card">
-              <div class="section-title"><div><h3>資料格式</h3><p>對應你的 ESP8266 JSON 欄位</p></div></div>
-              <pre>{
-  "temp": 26.5,
-  "humi": 61.2,
-  "gas": 341,
-  "light": 1
-}</pre>
+              <div class="section-title"><div><h3>數據儀表圖</h3><p>顯示最新一筆 temp、humi、gas</p></div></div>
+              <canvas id="gaugeChart" height="250"></canvas>
             </div>
           </div>
 
@@ -237,6 +233,8 @@ safe-buffer/index.js:
     let subscriptions = new Set();
     let rows = [];
     let logs = ['App ready.'];
+    let chartHistory = [];
+    let latestDataPoint = { temp: null, humi: null, gas: null };
     const theme = { current: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' };
     document.documentElement.setAttribute('data-theme', theme.current);
     updateThemeBtn();
@@ -250,6 +248,85 @@ safe-buffer/index.js:
     function parsePayload(text){ try { return JSON.parse(text); } catch { return null; } }
     function lightText(v){ if (v === 1 || v === '1') return ['Dark','status-on']; if (v === 0 || v === '0') return ['Bright','status-off']; return ['Unknown','status-unk']; }
     function redrawSubs(){ const list = [...subscriptions]; els.subList.innerHTML = list.length ? list.map(t => `<li class="msg-row"><strong>${esc(t)}</strong><span class="muted">Listening</span></li>`).join('') : '<li class="msg-row"><span>尚未訂閱</span><span class="muted">0 topic</span></li>'; }
+    function drawGaugeChart(){
+      const canvas = document.getElementById('gaugeChart');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const cssWidth = canvas.clientWidth || 420;
+      const cssHeight = 250;
+      canvas.width = cssWidth * dpr;
+      canvas.height = cssHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+      const styles = getComputedStyle(document.documentElement);
+      const textColor = styles.getPropertyValue('--color-text').trim() || '#222';
+      const muted = styles.getPropertyValue('--color-text-muted').trim() || '#666';
+      const grid = 'rgba(120,120,120,0.15)';
+      const pad = { left: 38, right: 12, top: 12, bottom: 28 };
+      const w = cssWidth - pad.left - pad.right;
+      const h = cssHeight - pad.top - pad.bottom;
+
+      ctx.strokeStyle = grid;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const y = pad.top + (h / 3) * i;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(pad.left + w, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = muted;
+      ctx.font = '12px Inter, Arial, sans-serif';
+
+      const values = chartHistory.flatMap(i => [i.temp, i.humi, i.gas]).filter(v => v !== null && v !== undefined && !Number.isNaN(Number(v))).map(Number);
+      if (!values.length) {
+        if (latestDataPoint.temp == null && latestDataPoint.humi == null && latestDataPoint.gas == null) {
+        ctx.fillText('等待數據中...', pad.left, pad.top + 18);
+        return;
+      }
+
+      const gauges = [
+        { label: 'Temp', value: latestDataPoint.temp, max: 50, color: '#01696f', unit: '°C' },
+        { label: 'Humi', value: latestDataPoint.humi, max: 100, color: '#d19900', unit: '%' },
+        { label: 'Gas', value: latestDataPoint.gas, max: Math.max(500, Number(latestDataPoint.gas || 0)), color: '#7a39bb', unit: '' }
+      ].filter(i => i.value != null && !Number.isNaN(Number(i.value)));
+
+      const centers = gauges.length === 1 ? [cssWidth / 2] : gauges.length === 2 ? [cssWidth * 0.3, cssWidth * 0.7] : [cssWidth * 0.18, cssWidth * 0.5, cssWidth * 0.82];
+      const radius = Math.min(58, cssWidth / 7);
+
+      gauges.forEach((g, idx) => {
+        const cx = centers[idx];
+        const cy = 155;
+        const start = Math.PI;
+        const end = 0;
+        ctx.strokeStyle = 'rgba(120,120,120,0.18)';
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, start, end, false);
+        ctx.stroke();
+
+        const ratio = Math.max(0, Math.min(1, Number(g.value) / Number(g.max || 1)));
+        ctx.strokeStyle = g.color;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, start, start + Math.PI * ratio, false);
+        ctx.stroke();
+
+        ctx.fillStyle = textColor;
+        ctx.font = 'bold 15px Inter, Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(g.label, cx, cy - 10);
+        ctx.font = 'bold 18px Inter, Arial, sans-serif';
+        ctx.fillText(`${Number(g.value).toFixed(1)}${g.unit}`, cx, cy + 18);
+        ctx.font = '12px Inter, Arial, sans-serif';
+        ctx.fillStyle = muted;
+        ctx.fillText(`0 - ${Number(g.max).toFixed(0)}`, cx, cy + 42);
+      });
+      ctx.textAlign = 'start';
+    }
+
     function refreshDashboard(topic, data){
       const temp = data?.temp; const humi = data?.humi; const gas = data?.gas; const light = data?.light;
       if (temp !== undefined) els.tempVal.textContent = Number(temp).toFixed(2);
@@ -288,6 +365,8 @@ safe-buffer/index.js:
     els.clearLogBtn.addEventListener('click', () => { logs = ['Logs cleared.']; els.logBox.textContent = logs.join('\n'); });
     els.themeBtn.addEventListener('click', () => { theme.current = theme.current === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', theme.current); updateThemeBtn(); });
     setStatus('disconnected','Disconnected');
+    drawGaugeChart();
+    window.addEventListener('resize', drawGaugeChart);
     log('Ready for topic IOT-LABIOT-G1.');
   </script>
 
